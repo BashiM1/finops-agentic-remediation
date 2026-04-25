@@ -26,7 +26,7 @@ screenshots. Object Lock with COMPLIANCE mode would create
 undeleteable objects for 2555 days in an account being used for testing,
 preventing clean teardown.
 
-**Demonstration deployment (sister's account, ~5 months remaining):**
+**Demonstration deployment (tobedetermined):**
 Object Lock enabled in GOVERNANCE mode with 30-day retention.
 GOVERNANCE mode allows clean teardown via root account override while
 still demonstrating the WORM control architecture. 30-day retention is
