@@ -1,4 +1,12 @@
 # Installed Lambda dependencies - not committed to git
+boto3/
+botocore/
+bin/
+dateutil/
+jmespath/
+s3transfer/
+urllib3/
+six.py
 *.dist-info/
 *.egg-info/
 __pycache__/

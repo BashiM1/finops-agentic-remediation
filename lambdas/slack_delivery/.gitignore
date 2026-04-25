@@ -1,5 +1,15 @@
 # Installed Lambda dependencies - not committed to git
-# Installed via: pip install -r ../requirements.txt --target .
+# Reinstall with: pip install -r ../requirements.txt --target .
+aws_lambda_powertools/
+boto3/
+botocore/
+bin/
+dateutil/
+jmespath/
+s3transfer/
+urllib3/
+six.py
+THIRD-PARTY-LICENSES
 *.dist-info/
 *.egg-info/
 __pycache__/
