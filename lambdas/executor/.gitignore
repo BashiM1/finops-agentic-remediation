@@ -10,3 +10,6 @@ six.py
 *.dist-info/
 *.egg-info/
 __pycache__/
+six.py
+typing_extensions.py
+THIRD-PARTY-LICENSES
