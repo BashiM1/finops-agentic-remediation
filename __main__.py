@@ -13,7 +13,7 @@ account_id = current_identity.account_id
 # ==============================================================================
 # 1. AUDIT INFRASTRUCTURE
 # Lab deployment: S3 without Object Lock for safe teardown.
-# Production deployment: enable Object Lock in GOVERNANCE mode with 30-day
+# Production deployment: to test PoC - enable Object Lock in GOVERNANCE mode with 30-day
 # retention per ADR-0003-object-lock-deviation.md
 # ==============================================================================
 finops_audit_ledger = aws.s3.BucketV2(
