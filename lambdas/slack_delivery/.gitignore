@@ -1,0 +1,5 @@
+# Installed Lambda dependencies - not committed to git
+# Installed via: pip install -r ../requirements.txt --target .
+*.dist-info/
+*.egg-info/
+__pycache__/

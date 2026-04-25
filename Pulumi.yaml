@@ -1,0 +1,7 @@
+name: finops-agentic-remediation
+runtime:
+  name: python
+  options:
+    toolchain: pip
+    virtualenv: venv
+description: SCC 7.2 Compliant FinOps Agentic Remediation Engine

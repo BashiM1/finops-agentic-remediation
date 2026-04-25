@@ -1,0 +1,9 @@
+# Snyk ignore policy
+# Format: SNYK-ECOSYSTEM-PACKAGE-ID
+# Only add entries here after reviewing the vulnerability report.
+# Each entry requires a specific architectural justification.
+# Review and update expiry dates quarterly.
+
+version: v1.19.0
+ignore: {}
+patch: {}

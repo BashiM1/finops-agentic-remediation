@@ -1,0 +1,114 @@
+name: "DevSecOps: Snyk Hardened Pipeline"
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+
+env:
+  AWS_REGION: "eu-west-2"
+
+jobs:
+  security-gates:
+    name: "Security Gates (Snyk + Checkov + Tests)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pytest ruff
+          pip install -r lambdas/requirements.txt
+
+      - name: Ruff lint
+        run: ruff check ./lambdas
+
+      - name: Unit tests
+        run: pytest tests/unit/ -v
+
+      - name: Snyk Code (SAST)
+        run: snyk code test --severity-threshold=high
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Snyk Open Source (SCA)
+        run: |
+          snyk test \
+            --file=./lambdas/requirements.txt \
+            --severity-threshold=high
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Checkov IaC scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: '.'
+          framework: 'all'
+          soft_fail: true
+          skip_check: CKV_AWS_116,CKV_AWS_117
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          snyk sbom \
+            --format=cyclonedx1.4+json \
+            --file=./lambdas/requirements.txt \
+            --output=sbom.json
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Archive security artefacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-and-compliance-bundle
+          path: sbom.json
+          retention-days: 30
+
+  deploy:
+    name: "Pulumi OIDC Deployment"
+    needs: security-gates
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::582600397173:role/GitHubActions-FinOps-Deployer
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Pulumi
+        run: pip install pulumi pulumi-aws
+
+      - name: Pulumi up
+        uses: pulumi/actions@v4
+        with:
+          command: up
+          stack-name: dev
+          work-dir: .
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_CONFIG_PASSPHRASE: ${{ secrets.PULUMI_CONFIG_PASSPHRASE }}

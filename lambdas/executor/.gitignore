@@ -1,0 +1,4 @@
+# Installed Lambda dependencies - not committed to git
+*.dist-info/
+*.egg-info/
+__pycache__/

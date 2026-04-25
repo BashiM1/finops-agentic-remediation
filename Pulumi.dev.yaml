@@ -1,0 +1,5 @@
+secretsprovider: passphrase
+config:
+  aws:region: eu-west-2
+  finops-agentic-remediation:slackSecretArn: "PLACEHOLDER_REPLACE_AFTER_SECRET_CREATED"
+  finops-agentic-remediation:orgId: "single-account"
