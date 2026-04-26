@@ -664,10 +664,11 @@ finops_state_machine = aws.sfn.StateMachine(
                     "FunctionName": args["slack_arn"],
                     "Payload": {
                         "TaskToken.$": "$$.Task.Token",
-                        "InstanceId.$": "$.EventDetails.InstanceId"
-                    
+                        "EventDetails.$": "$.EventDetails",
+                        "BedrockAnalysis.$": "$.BedrockAnalysis"
                     }
                 },
+                "ResultPath": "$.ApprovalResult",
                 "Catch": [
                     {
                         "ErrorEquals": ["States.HeartbeatTimeout"],
@@ -694,7 +695,7 @@ finops_state_machine = aws.sfn.StateMachine(
                     "FunctionName": args["exec_arn"],
                     "Payload": {
                         "InstanceId.$": "$.EventDetails.InstanceId",
-                        "AuthorizedBy.$": "$.AuthorizedBy"
+                        "AuthorizedBy.$": "$.ApprovalResult.AuthorizedBy"
                     }
                 },
                 "Catch": [{

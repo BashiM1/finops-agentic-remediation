@@ -168,9 +168,10 @@ def handle_outbound_delivery(event):
     Posts the approval message to Slack via incoming webhook.
     """
     task_token = event.get('TaskToken', '')
-    instance_id = event.get('InstanceId', '')
-    region = event.get('Region', 'eu-west-2')
-    savings = event.get('EstimatedMonthlySavings', 'unknown')
+    event_details = event.get('EventDetails', {})
+    instance_id = event_details.get('InstanceId', '')
+    region = event_details.get('Region', 'eu-west-2')
+    savings = event_details.get('EstimatedMonthlySavings', 'unknown')
     bedrock_analysis = event.get('BedrockAnalysis', {})
 
     # Defensive validation
@@ -192,10 +193,10 @@ def handle_outbound_delivery(event):
     # Persist task token mapping for callback resolution
     table = dynamodb.Table(STATE_CACHE_TABLE)
     table.put_item(Item={
-        'instance_id': instance_id,
-        'task_token': task_token,
-        'created_at': int(time.time()),
-        'ttl': int(time.time()) + 86400
+        'TaskToken': task_token,
+        'InstanceId': instance_id,
+        'CreatedAt': int(time.time()),
+        'TTL': int(time.time()) + 86400
     })
 
     blocks = build_approval_blocks(instance_id, region, savings, analysis_text, task_token)
