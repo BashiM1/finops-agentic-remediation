@@ -2,3 +2,4 @@ config:
   aws:region: eu-west-2
   finops-agentic-remediation:slackSecretArn: "arn:aws:secretsmanager:eu-west-2:582600397173:secret:slack/finops/signing-secret-ZmHJzS"
   finops-agentic-remediation:orgId: "single-account"
+  finops-agentic-remediation:slackWebhookSecretArn: arn:aws:secretsmanager:eu-west-2:582600397173:secret:slack/finops/webhook-url-vYsv3F

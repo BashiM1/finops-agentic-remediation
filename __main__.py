@@ -406,6 +406,7 @@ gateway_policy = aws.iam.RolePolicy(
     role=gateway_role.id,
     policy=pulumi.Output.all(
         secret_arn=slack_secret_arn,
+        webhook_secret_arn=config.require("slackWebhookSecretArn"),
         approvers_arn=approvers_table.arn,
         state_cache_arn=state_cache_table.arn
     ).apply(lambda args: json.dumps({
@@ -415,7 +416,10 @@ gateway_policy = aws.iam.RolePolicy(
                 "Sid": "AllowSlackSecretRead",
                 "Effect": "Allow",
                 "Action": ["secretsmanager:GetSecretValue"],
-                "Resource": args["secret_arn"]
+                "Resource": [
+                    args["secret_arn"],
+                    args["webhook_secret_arn"]
+                ]
             },
             {
                 "Sid": "AllowDynamoDBRead",
@@ -481,8 +485,9 @@ slack_gateway_lambda = aws.lambda_.Function(
     environment=aws.lambda_.FunctionEnvironmentArgs(
         variables={
             "SLACK_SECRET_ARN": slack_secret_arn,
+            "SLACK_WEBHOOK_SECRET_ARN": config.require("slackWebhookSecretArn"),
+            "STATE_CACHE_TABLE": state_cache_table.name,
             "APPROVERS_TABLE": approvers_table.name,
-            "STATE_CACHE_TABLE": state_cache_table.name
         }
     ),
     tracing_config=aws.lambda_.FunctionTracingConfigArgs(
