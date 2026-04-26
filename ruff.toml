@@ -1,0 +1,17 @@
+[lint]
+# Only lint our actual source code, not bundled Lambda deps
+exclude = [
+    "lambdas/*/typing_extensions.py",
+    "lambdas/*/six.py",
+    "lambdas/*/aws_lambda_powertools",
+    "lambdas/*/boto3",
+    "lambdas/*/botocore",
+    "lambdas/*/dateutil",
+    "lambdas/*/jmespath",
+    "lambdas/*/s3transfer",
+    "lambdas/*/urllib3",
+    "lambdas/*/bin",
+    "lambdas/*/*.dist-info",
+    "**/__pycache__",
+    "venv",
+]
