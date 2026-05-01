@@ -16,6 +16,7 @@ from aws_lambda_powertools.utilities import parameters
 dynamodb = boto3.resource('dynamodb', region_name='eu-west-2')
 ec2 = boto3.client('ec2', region_name='eu-west-2')
 sfn = boto3.client('stepfunctions', region_name='eu-west-2')
+sqs = boto3.client('sqs', region_name='eu-west-2')
 
 SLACK_SECRET_ARN = os.environ.get('SLACK_SECRET_ARN', '')
 SLACK_WEBHOOK_SECRET_ARN = os.environ.get('SLACK_WEBHOOK_SECRET_ARN', '')
@@ -214,13 +215,19 @@ def handle_outbound_delivery(event):
 def handle_inbound_callback(event):
     """
     Handle HTTP callback from Slack button click via API Gateway.
-    Verifies HMAC, looks up approver, performs drift check, sends task success.
+
+    Verifies HMAC, then enqueues the callback for async processing
+    on SQS. Returns 200 immediately to fit inside Slack's 3-second
+    response window. The callback processor Lambda performs the
+    heavier work (approver lookup, SendTaskSuccess) outside that window.
     """
     headers = event.get('headers', {})
     raw_body = event.get('body', '')
     if event.get('isBase64Encoded'):
         raw_body = base64.b64decode(raw_body).decode('utf-8')
 
+    # Security boundary: HMAC stays here. The processor trusts SQS
+    # messages because only an HMAC-verified request can produce one.
     secret = get_slack_secret()
     if not verify_slack_signature(headers, raw_body, secret):
         print("AUTH_REJECT: Invalid Slack signature")
@@ -240,30 +247,34 @@ def handle_inbound_callback(event):
     action_id = action.get('action_id', '')
     task_token = action.get('value', '')
 
-    # Validate approver
-    approvers_table = dynamodb.Table(APPROVERS_TABLE)
-    approver = approvers_table.get_item(Key={'slack_user_id': user_id}).get('Item')
-    if not approver or approver.get('status') != 'ACTIVE':
-        print(f"APPROVER_REJECT: user={user_id}")
-        return {"statusCode": 403, "body": "Not an active approver"}
-
+    # Translate Slack action_id to internal decision verb
     if action_id == 'approve_remediation':
-        sfn.send_task_success(
-            taskToken=task_token,
-            output=json.dumps({"AuthorizedBy": user_id, "Decision": "APPROVED"})
-        )
-        print(f"APPROVAL_GRANTED: user={user_id}")
-        return {"statusCode": 200, "body": "Approved"}
+        decision = 'APPROVED'
     elif action_id == 'reject_remediation':
-        sfn.send_task_failure(
-            taskToken=task_token,
-            error="HumanRejection",
-            cause=f"Rejected by {user_id}"
-        )
-        print(f"APPROVAL_REJECTED: user={user_id}")
-        return {"statusCode": 200, "body": "Rejected"}
+        decision = 'REJECTED'
     else:
         return {"statusCode": 400, "body": "Unknown action"}
+
+    # Enqueue for async processing. The processor will look up the
+    # approver in DynamoDB and resume Step Functions. Snake_case keys
+    # match the contract defined in callback_processor/handler.py.
+    queue_url = os.environ['CALLBACK_QUEUE_URL']
+    message_body = json.dumps({
+        "task_token": task_token,
+        "decision": decision,
+        "user_id": user_id,
+    })
+
+    try:
+        sqs.send_message(QueueUrl=queue_url, MessageBody=message_body)
+        print(f"CALLBACK_ENQUEUED: user={user_id}, decision={decision}")
+    except Exception as e:
+        # If SQS itself is broken we can't recover. Log and let Slack
+        # see a 500 — that's correct because the request truly failed.
+        print(f"SQS_ENQUEUE_FAILED: {e}")
+        return {"statusCode": 500, "body": "Internal error"}
+
+    return {"statusCode": 200, "body": "Received"}
 
 
 def lambda_handler(event, context):

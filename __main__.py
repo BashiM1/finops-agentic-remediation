@@ -129,7 +129,39 @@ state_cache_table = aws.dynamodb.Table(
     ),
     tags={"FinOps-Managed": "True", "Environment": "Dev"}
 )
+# ─────────────────────────────────────────────────────────────────
+# SQS queue for async Slack callback processing
+# Decouples synchronous Slack 3-second response window from the
+# heavier DynamoDB lookup + SendTaskSuccess work. DLQ catches any
+# message that fails processing more than 3 times.
+# ─────────────────────────────────────────────────────────────────
 
+callback_dlq = aws.sqs.Queue(
+    "callback-dlq",
+    name="finops-callback-dlq",
+    message_retention_seconds=1209600,  # 14 days, max
+    tags={
+        "Project": "FinOps-Remediation",
+        "Purpose": "DeadLetter",
+    },
+)
+
+callback_queue = aws.sqs.Queue(
+    "callback-queue",
+    name="finops-callback-queue",
+    visibility_timeout_seconds=60,  # must exceed processor Lambda timeout
+    message_retention_seconds=345600,  # 4 days
+    redrive_policy=callback_dlq.arn.apply(
+        lambda dlq_arn: json.dumps({
+            "deadLetterTargetArn": dlq_arn,
+            "maxReceiveCount": 3,
+        })
+    ),
+    tags={
+        "Project": "FinOps-Remediation",
+        "Purpose": "SlackCallbackProcessing",
+    },
+)
 # ==============================================================================
 # 4. ZERO-TRUST GITHUB OIDC FEDERATION
 # Pinned to BashiM1/finops-agentic-remediation main branch.
@@ -414,8 +446,8 @@ gateway_policy = aws.iam.RolePolicy(
     policy=pulumi.Output.all(
         secret_arn=slack_secret_arn,
         webhook_secret_arn=config.require("slackWebhookSecretArn"),
-        approvers_arn=approvers_table.arn,
-        state_cache_arn=state_cache_table.arn
+        state_cache_arn=state_cache_table.arn,
+        callback_queue_arn=callback_queue.arn
     ).apply(lambda args: json.dumps({
         "Version": "2012-10-17",
         "Statement": [
@@ -429,36 +461,16 @@ gateway_policy = aws.iam.RolePolicy(
                 ]
             },
             {
-                "Sid": "AllowDynamoDBRead",
+                "Sid": "AllowStateCacheWrite",
                 "Effect": "Allow",
-                "Action": [
-                    "dynamodb:GetItem",
-                    "dynamodb:PutItem"
-                ],
-                "Resource": [
-                    args["approvers_arn"],
-                    args["state_cache_arn"]
-                ]
+                "Action": ["dynamodb:PutItem"],
+                "Resource": args["state_cache_arn"]
             },
             {
-                "Sid": "AllowStepFunctionsResume",
+                "Sid": "AllowEnqueueCallback",
                 "Effect": "Allow",
-                "Action": [
-                    "states:SendTaskSuccess",
-                    "states:SendTaskFailure"
-                ],
-                # PoC scope: wildcard acceptable.
-                # Production: scope to specific state machine ARN.
-                "Resource": "*"
-            },
-            {
-                "Sid": "AllowEC2Describe",
-                "Effect": "Allow",
-                "Action": [
-                    "ec2:DescribeInstances",
-                    "ec2:DescribeTags"
-                ],
-                "Resource": "*"
+                "Action": ["sqs:SendMessage"],
+                "Resource": args["callback_queue_arn"]
             }
         ]
     }))
@@ -495,6 +507,7 @@ slack_gateway_lambda = aws.lambda_.Function(
             "SLACK_WEBHOOK_SECRET_ARN": config.require("slackWebhookSecretArn"),
             "STATE_CACHE_TABLE": state_cache_table.name,
             "APPROVERS_TABLE": approvers_table.name,
+            "CALLBACK_QUEUE_URL": callback_queue.url,
         }
     ),
     tracing_config=aws.lambda_.FunctionTracingConfigArgs(
@@ -517,7 +530,107 @@ execution_lambda = aws.lambda_.Function(
     ),
     tags={"FinOps-Managed": "True", "Environment": "Dev"}
 )
+# ─────────────────────────────────────────────────────────────────
+# Callback Processor Lambda
+# Triggered by SQS messages from the Slack gateway after HMAC
+# verification. Performs the heavier work (DynamoDB lookup,
+# SendTaskSuccess) outside Slack's 3-second response window.
+# ─────────────────────────────────────────────────────────────────
 
+callback_processor_role = aws.iam.Role(
+    "callback-processor-role",
+    name="finops-callback-processor-role",
+    assume_role_policy=json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "lambda.amazonaws.com"},
+            "Action": "sts:AssumeRole",
+        }],
+    }),
+)
+
+aws.iam.RolePolicyAttachment(
+    "callback-processor-basic-execution",
+    role=callback_processor_role.name,
+    policy_arn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+)
+
+aws.iam.RolePolicyAttachment(
+    "callback-processor-xray",
+    role=callback_processor_role.name,
+    policy_arn="arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess",
+)
+
+aws.iam.RolePolicyAttachment(
+    "callback-processor-sqs",
+    role=callback_processor_role.name,
+    policy_arn="arn:aws:iam::aws:policy/service-role/AWSLambdaSQSQueueExecutionRole",
+)
+
+callback_processor_policy = aws.iam.RolePolicy(
+    "callback-processor-policy",
+    role=callback_processor_role.id,
+    policy=pulumi.Output.all(
+        approvers_arn=approvers_table.arn,
+    ).apply(lambda args: json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "ReadApprovers",
+                "Effect": "Allow",
+                "Action": "dynamodb:GetItem",
+                "Resource": args["approvers_arn"],
+            },
+            {
+                "Sid": "RespondToStepFunctions",
+                "Effect": "Allow",
+                "Action": [
+                    "states:SendTaskSuccess",
+                    "states:SendTaskFailure",
+                    "states:SendTaskHeartbeat",
+                ],
+                # Task tokens are unguessable; scoping to "*" is the
+                # AWS-recommended pattern. The token itself is the
+                # capability — no other resource scoping is meaningful.
+                "Resource": "*",
+            },
+        ],
+    })),
+)
+
+callback_processor_lambda = aws.lambda_.Function(
+    "callback-processor-lambda",
+    name="finops-callback-processor",
+    code=pulumi.FileArchive("./lambdas/callback_processor"),
+    role=callback_processor_role.arn,
+    handler="handler.lambda_handler",
+    runtime=aws.lambda_.Runtime.PYTHON3D11,
+    timeout=10,
+    memory_size=256,
+    environment=aws.lambda_.FunctionEnvironmentArgs(
+        variables={
+            "APPROVERS_TABLE": approvers_table.name,
+        },
+    ),
+    tracing_config=aws.lambda_.FunctionTracingConfigArgs(
+        mode="Active",
+    ),
+    tags={"FinOps-Managed": "True", "Environment": "Dev"},
+)
+# ─────────────────────────────────────────────────────────────────
+# SQS Event Source Mapping
+# Wires the queue to the processor Lambda. Lambda will poll SQS
+# and invoke the function with batches of messages.
+# ─────────────────────────────────────────────────────────────────
+
+callback_processor_event_source = aws.lambda_.EventSourceMapping(
+    "callback-processor-event-source",
+    event_source_arn=callback_queue.arn,
+    function_name=callback_processor_lambda.name,
+    batch_size=1,
+    enabled=True,
+)
 escalation_topic = aws.sns.Topic(
     "finops-escalation",
     name="finops-escalation-topic",
