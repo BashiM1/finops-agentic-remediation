@@ -1,0 +1,84 @@
+%% FinOps Agentic Remediation Engine — component-level flow.
+%% Trust boundaries are rendered as diamond gates (HMAC, Approval, HardDeny).
+%% slack_delivery is a single Lambda invoked in two modes; rendered as two
+%% nodes for diagram clarity.
+
+flowchart TB
+    classDef gate fill:#fef3c7,stroke:#92400e,stroke-width:2px,color:#1f2937
+    classDef store fill:#e0e7ff,stroke:#3730a3,color:#1f2937
+    classDef ext fill:#fce7f3,stroke:#9f1239,color:#1f2937
+    classDef sink fill:#fee2e2,stroke:#991b1b,color:#1f2937
+
+    subgraph Ingress
+        direction TB
+        EB[("EventBridge bus<br/>cost-anomaly events")]
+        APIGW[/"API Gateway (HTTP)"/]
+    end
+
+    subgraph Orchestration
+        direction TB
+        SFN["Step Functions<br/>FinOps-Remediation-Engine"]
+        BR["Bedrock<br/>Claude Haiku 4.5"]
+    end
+
+    subgraph HiL ["Human-in-Loop"]
+        direction TB
+        SD_OUT["slack_delivery<br/>(outbound mode)"]
+        SLACK(["Slack workspace<br/>(human reviewer)"]):::ext
+        HMAC{{"HMAC-SHA256<br/>verify"}}:::gate
+        SD_IN["slack_delivery<br/>(inbound mode)"]
+        SQS[("SQS callback queue")]:::store
+        DLQ[("SQS DLQ")]:::store
+        CP["callback_processor"]
+        APPROVERS[("DynamoDB<br/>FinOps-Approvers")]:::store
+        STATECACHE[("DynamoDB<br/>FinOps-StateCache")]:::store
+        APPROVAL{{"Approver ACTIVE?<br/>token valid?"}}:::gate
+    end
+
+    subgraph Execution
+        direction TB
+        EXEC["executor"]
+        HARDDENY{{"IAM HardDeny<br/>+ in-Lambda tag re-check"}}:::gate
+        EC2(["EC2 instance<br/>(target)"]):::ext
+    end
+
+    subgraph Audit
+        direction TB
+        LEDGER[("S3 audit ledger<br/>finops-audit-ledger-acct")]:::store
+    end
+
+    SNS[(SNS escalation topic)]:::sink
+
+    %% Forward path
+    EB -- "rule match → StartExecution" --> SFN
+    SFN -- "AnalyzeAnomalyWithBedrock" --> BR
+    BR -- "risk summary" --> SFN
+    SFN -- "RequestHumanApproval<br/>(waitForTaskToken, 24h / 1h heartbeat)" --> SD_OUT
+    SD_OUT -- "incoming webhook" --> SLACK
+    SD_OUT -. "write token → instance" .-> STATECACHE
+
+    %% Inbound callback path
+    SLACK -- "button click" --> APIGW
+    APIGW --> HMAC
+    HMAC -- "valid signature" --> SD_IN
+    HMAC -- "invalid → 401" --> SNS
+    SD_IN -- "enqueue + return 200<br/>(under Slack 3s window)" --> SQS
+    SQS --> CP
+    SQS -. "redrive policy" .-> DLQ
+    DLQ -.-> SNS
+
+    CP -- "lookup slack_user_id" --> APPROVERS
+    CP -- "lookup task token" --> STATECACHE
+    CP --> APPROVAL
+    APPROVAL -- "approved → SendTaskSuccess" --> SFN
+    APPROVAL -- "denied / timeout / unknown approver" --> SNS
+
+    %% Execution path
+    SFN -- "ExecuteRemediation" --> EXEC
+    EXEC --> HARDDENY
+    HARDDENY -- "Environment != Prod<br/>FinOps-Managed = True" --> EC2
+    HARDDENY -- "denied (defence in depth)" --> SNS
+
+    %% Audit path
+    EXEC -. "PUT.OBJECT (terminal write)" .-> LEDGER
+    SFN -. "HandleHumanTimeout / NotifyAPIDrop" .-> SNS
