@@ -10,6 +10,7 @@ A governance and execution backend for cloud cost remediation actions. It accept
 - **Not a multi-action platform.** Current execution scope is `ec2:StopInstances` against a single instance per remediation. Additional actions are pluggable via the Step Functions state machine but are not implemented.
 - **Not multi-tenant.** Single AWS account, single region (`eu-west-2`). The deploy OIDC trust policy pins to `BashiM1/finops-agentic-remediation` `main` (`__main__.py:196`).
 - **Not production-deployed.** This is a reference implementation demonstrating the architectural pattern. SCC 7.2 alignment is by design intent, not by audit certification — the completeness Athena query in `docs/compliance/SCC-7.2-Audit-Procedures.md` describes the procedure but has not been validated by a third-party assessor.
+- **Audit-ledger writes are not yet wired.** The `finops-audit-ledger-<account>` bucket, Object Lock configuration, and the IAM `Allow` granting `s3:PutObject` to the executor role (`__main__.py:403`) are all in place, but no Lambda currently calls `s3.put_object`. Until the executor (or a dedicated audit Lambda) emits a record on each terminal state, the completeness gap query would flag every successful execution as a finding. Tracked as a known gap; closing it is a precondition for any production claim about SCC 7.2 non-repudiation.
 
 ## Discovery Integration (Out of Scope; Future Work)
 

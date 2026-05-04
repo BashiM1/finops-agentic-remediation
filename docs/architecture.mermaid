@@ -2,6 +2,14 @@
 %% Trust boundaries are rendered as diamond gates (HMAC, Approval, HardDeny).
 %% slack_delivery is a single Lambda invoked in two modes; rendered as two
 %% nodes for diagram clarity.
+%% Topology note: the HMAC gate is implemented INSIDE slack_delivery inbound
+%% mode (lambdas/slack_delivery/main.py:232) and is rendered as a separate
+%% node only to make the trust boundary visible. There is no standalone
+%% HMAC component between API Gateway and the Lambda.
+%% Implementation status: the EXEC -> LEDGER edge is styled distinctly
+%% (orange/dashed) because the audit-ledger write is planned but not
+%% implemented. The bucket, Object Lock, and IAM Allow exist; no Lambda
+%% currently calls s3.put_object. See SCOPE.md.
 
 flowchart TB
     classDef gate fill:#fef3c7,stroke:#92400e,stroke-width:2px,color:#1f2937
@@ -48,6 +56,7 @@ flowchart TB
     end
 
     SNS[(SNS escalation topic)]:::sink
+    TERM_401(["401 Unauthorized<br/>(returned to caller)"]):::sink
 
     %% Forward path
     EB -- "rule match → StartExecution" --> SFN
@@ -61,7 +70,7 @@ flowchart TB
     SLACK -- "button click" --> APIGW
     APIGW --> HMAC
     HMAC -- "valid signature" --> SD_IN
-    HMAC -- "invalid → 401" --> SNS
+    HMAC -- "invalid signature" --> TERM_401
     SD_IN -- "enqueue + return 200<br/>(under Slack 3s window)" --> SQS
     SQS --> CP
     SQS -. "redrive policy" .-> DLQ
@@ -80,5 +89,9 @@ flowchart TB
     HARDDENY -- "denied (defence in depth)" --> SNS
 
     %% Audit path
-    EXEC -. "PUT.OBJECT (terminal write)" .-> LEDGER
+    EXEC -. "PUT.OBJECT (planned, not implemented)" .-> LEDGER
     SFN -. "HandleHumanTimeout / NotifyAPIDrop" .-> SNS
+
+    %% Style the planned ledger edge distinctly. Edge index 23 corresponds
+    %% to the EXEC -> LEDGER edge in declaration order.
+    linkStyle 23 stroke:#ea580c,stroke-width:2px,stroke-dasharray:6 3

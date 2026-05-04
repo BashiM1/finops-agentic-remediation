@@ -127,4 +127,6 @@ Scope-boundary ADRs (added with this documentation pass):
 
 The stack targets **SOC 2 / SCC 7.2** non-repudiation. The completeness assertion is the Athena gap query in [`docs/compliance/SCC-7.2-Audit-Procedures.md`](./docs/compliance/SCC-7.2-Audit-Procedures.md): any Step Functions `SUCCEEDED` execution without a corresponding `PUT.OBJECT` on the audit-ledger bucket is a finding.
 
+**Known gap:** the audit-ledger *writer* is not yet implemented. The bucket, Object Lock configuration, and the IAM Allow on `s3:PutObject` (`__main__.py:403`) are in place, but no Lambda currently calls `s3.put_object`. Until that lands, the gap query would flag every successful execution. The `EXEC → LEDGER` edge in [`docs/architecture.mermaid`](./docs/architecture.mermaid) is rendered in dashed orange to mark it as planned. See [`SCOPE.md`](./SCOPE.md).
+
 This is a **reference implementation**. The control families are designed to map to SCC 7.2 — alignment is by design intent, not by audit certification. See [`SCOPE.md`](./SCOPE.md) for what would be required to promote the deployment to production.
