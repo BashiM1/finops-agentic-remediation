@@ -1,4 +1,4 @@
-# ADR-002: Opt-in Resource Enrolment via Tags
+# ADR 0005: Opt-in Resource Enrolment via Tags
 
 ## Status
 

@@ -1,4 +1,4 @@
-# ADR-001: Discovery vs Execution Scope Boundary
+# ADR 0004: Discovery vs Execution Scope Boundary
 
 ## Status
 

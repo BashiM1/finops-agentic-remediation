@@ -1,4 +1,4 @@
-# ADR-003: Async Callback Processing via SQS
+# ADR 0006: Async Callback Processing via SQS
 
 ## Status
 

@@ -107,17 +107,12 @@ There is no integration suite. End-to-end validation is captured in `evidence/` 
 
 ## Architecture Decision Records
 
-Existing:
-
 - [`0001-choice-of-llm.md`](./docs/adr/0001-choice-of-llm.md) — why Claude Haiku 4.5, and the per-deploy model-validation contract.
 - [`0002-snyk-hybrid-security.md`](./docs/adr/0002-snyk-hybrid-security.md) — Snyk Code + SCA + Checkov composition, why all three.
 - [`0003-object-lock-deviation.md`](./docs/adr/0003-object-lock-deviation.md) — why Object Lock is intentionally disabled in dev.
-
-Scope-boundary ADRs (added with this documentation pass):
-
-- [`ADR-001-discovery-vs-execution.md`](./docs/adr/ADR-001-discovery-vs-execution.md) — why discovery is upstream and out of scope.
-- [`ADR-002-opt-in-resource-enrolment.md`](./docs/adr/ADR-002-opt-in-resource-enrolment.md) — why `FinOps-Managed=True` is required, not assumed.
-- [`ADR-003-async-callback-processing.md`](./docs/adr/ADR-003-async-callback-processing.md) — why the Slack callback path is split across API Gateway, SQS, and a consumer Lambda.
+- [`0004-discovery-vs-execution.md`](./docs/adr/0004-discovery-vs-execution.md) — why discovery is upstream and out of scope.
+- [`0005-opt-in-resource-enrolment.md`](./docs/adr/0005-opt-in-resource-enrolment.md) — why `FinOps-Managed=True` is required, not assumed.
+- [`0006-async-callback-processing.md`](./docs/adr/0006-async-callback-processing.md) — why the Slack callback path is split across API Gateway, SQS, and a consumer Lambda.
 
 ## Related Projects
 
