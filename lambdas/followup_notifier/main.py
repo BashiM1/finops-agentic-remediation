@@ -30,7 +30,16 @@ from google.auth.transport.requests import AuthorizedSession, Request
 
 secretsmanager = boto3.client("secretsmanager", region_name="eu-west-2")
 compute_optimizer = boto3.client("compute-optimizer", region_name="eu-west-2")
+bedrock = boto3.client("bedrock-runtime", region_name="eu-west-2")
 _AWS_ACCOUNT_ID = "582600397173"
+# CRIS profile in eu-west-2 — mirrors the remediation state machine.
+_BEDROCK_MODEL_ID = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+_BEDROCK_SYSTEM_PROMPT = (
+    "You are a FinOps analyst. Given cost estimates and utilisation data "
+    "from Compute Optimizer or GCP Recommender, produce a 2-3 sentence "
+    "assessment: is the resource overprovisioned, what action do you "
+    "recommend, and what are the quantified savings? Be direct."
+)
 
 SLACK_WEBHOOK_SECRET_ARN = os.environ["SLACK_WEBHOOK_SECRET_ARN"]
 GCP_WIF_PROVIDER_RESOURCE_NAME = os.environ.get("GCP_WIF_PROVIDER_RESOURCE_NAME", "")
@@ -115,10 +124,23 @@ _GCP_PENDING_NOTE = "GCP Recommender enrichment pending — ships with GCP remed
 
 
 def _build_enriched_resources(detail: dict) -> list[dict]:
-    """Per-resource enrichment loop. Each entry = original resource + `enrichment`."""
+    """Per-resource enrichment loop. Each entry = original resource + `enrichment`.
+
+    A resource may carry a `_enrichment_override` field — used only for
+    test invocations to exercise downstream paths (notably the Bedrock
+    assessment) without a 30h Compute Optimizer wait. EventBridge
+    Scheduler pushes the original CostGateThresholdExceeded detail
+    verbatim, which doesn't include this key, so the override is only
+    reachable via direct `aws lambda invoke`.
+    """
     enriched: list[dict] = []
     for r in detail.get("resources") or []:
         out = dict(r)
+        override = r.get("_enrichment_override")
+        if isinstance(override, dict):
+            out["enrichment"] = override
+            enriched.append(out)
+            continue
         cloud = r.get("cloud")
         rtype = r.get("resource_type", "")
         if cloud == "aws" and rtype == "aws_instance":
@@ -136,6 +158,75 @@ def _build_enriched_resources(detail: dict) -> list[dict]:
             out["enrichment"] = {"status": "skipped", "reason": f"no enricher for {cloud}/{rtype}"}
         enriched.append(out)
     return enriched
+
+
+def _has_actionable_data(enriched: list[dict]) -> bool:
+    """At least one resource with a real Compute Optimizer / Recommender result."""
+    return any((r.get("enrichment") or {}).get("status") == "ok" for r in enriched)
+
+
+def _bedrock_input_payload(enriched: list[dict]) -> list[dict]:
+    """Trim enrichment to the fields the analyst needs — keeps prompt cheap."""
+    payload = []
+    for r in enriched:
+        e = r.get("enrichment") or {}
+        if e.get("status") != "ok":
+            continue
+        payload.append({
+            "address": r.get("address"),
+            "cloud": r.get("cloud"),
+            "region": r.get("region"),
+            "monthly_cost_usd": r.get("monthly_cost_usd"),
+            "finding": e.get("finding"),
+            "current_type": e.get("current_type"),
+            "recommended_type": e.get("recommended_type"),
+            "estimated_monthly_savings_usd": e.get("estimated_monthly_savings_usd"),
+            "utilisation": e.get("utilisation"),
+        })
+    return payload
+
+
+def _bedrock_assess(enriched: list[dict]) -> str | None:
+    """Send actionable enrichment to Claude Haiku 4.5 for a 2-3 sentence assessment.
+
+    Returns the model's text on success; None if the call fails or is
+    skipped (no actionable data). Never raises — Slack post must not
+    depend on Bedrock availability.
+    """
+    if not _has_actionable_data(enriched):
+        print("BEDROCK_SKIP: no resources with status=ok")
+        return None
+    payload = _bedrock_input_payload(enriched)
+    user_message = (
+        "Resources flagged by the cost gate with utilisation data:\n"
+        + json.dumps(payload, indent=2)
+    )
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 400,
+        "system": _BEDROCK_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_message}],
+    }
+    try:
+        resp = bedrock.invoke_model(
+            modelId=_BEDROCK_MODEL_ID,
+            body=json.dumps(body).encode("utf-8"),
+            contentType="application/json",
+            accept="application/json",
+        )
+        decoded = json.loads(resp["body"].read())
+    except (ClientError, ValueError, KeyError) as exc:
+        print(f"BEDROCK_ERROR: {type(exc).__name__}")
+        return None
+
+    # Anthropic Messages API: content is a list of blocks; type=text holds the prose.
+    blocks = decoded.get("content") or []
+    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+    if not text:
+        print("BEDROCK_EMPTY: model returned no text")
+        return None
+    print(f"BEDROCK_OK: tokens_in={decoded.get('usage', {}).get('input_tokens')} tokens_out={decoded.get('usage', {}).get('output_tokens')}")
+    return text
 
 
 def _get_webhook_url() -> str:
@@ -428,11 +519,23 @@ def lambda_handler(event, _context):
     # rendering — per-resource view replaces it.
     _query_recommender(detail)
 
+    # AI assessment via Bedrock — gated on at least one status=ok.
+    assessment = _bedrock_assess(enriched)
+
     fallback = f"Cost Gate follow-up for {repository} PR#{pr_number}"
     blocks = _build_blocks(detail)
     findings_section = _build_findings_section(enriched)
     if findings_section is not None:
         blocks.insert(-1, findings_section)
+    if assessment:
+        blocks.insert(-1, {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                # Section text caps at 3000; truncate defensively.
+                "text": ("*AI Assessment*\n" + assessment)[:2900],
+            },
+        })
     if not _post(webhook, blocks, fallback):
         # Raise so Scheduler records this as a failed invocation. The
         # schedule deletes itself afterwards either way (one-time +

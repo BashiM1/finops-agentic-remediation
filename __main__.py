@@ -960,6 +960,33 @@ aws.iam.RolePolicy(
                 "Action": "ec2:DescribeInstances",
                 "Resource": "*",
             },
+            {
+                # Cross-region inference profile (CRIS) for Claude Haiku 4.5.
+                # Mirrors the analyst-prompt path the main remediation
+                # state machine already uses; same model, same region pin.
+                "Sid": "InvokeBedrockHaikuCRIS",
+                "Effect": "Allow",
+                "Action": "bedrock:InvokeModel",
+                "Resource": f"arn:aws:bedrock:eu-west-2:{account_id}:inference-profile/eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+            },
+            {
+                # CRIS routes the actual inference to one of these
+                # foundation models in the EU multi-region pool;
+                # InvokeModel against the profile fans out and IAM
+                # is checked at the underlying model level.
+                "Sid": "InvokeBedrockHaikuFoundationModels",
+                "Effect": "Allow",
+                "Action": "bedrock:InvokeModel",
+                "Resource": [
+                    "arn:aws:bedrock:eu-west-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                    "arn:aws:bedrock:eu-west-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                    "arn:aws:bedrock:eu-west-3::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                    "arn:aws:bedrock:eu-central-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                    "arn:aws:bedrock:eu-north-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                    "arn:aws:bedrock:eu-south-1::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                    "arn:aws:bedrock:eu-south-2::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                ],
+            },
         ],
     }),
 )
