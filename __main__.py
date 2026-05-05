@@ -952,10 +952,20 @@ followup_notifier_lambda = aws.lambda_.Function(
     role=followup_notifier_role.arn,
     handler="main.lambda_handler",
     runtime=aws.lambda_.Runtime.PYTHON3D11,
-    timeout=15,
-    memory_size=128,
+    # Bumped from 15s/128MB: google-auth import + first WIF token mint
+    # (subject-token sign + GCP STS exchange + SA impersonation hop)
+    # comfortably exceeds the original budget.
+    timeout=30,
+    memory_size=256,
     environment=aws.lambda_.FunctionEnvironmentArgs(
-        variables={"SLACK_WEBHOOK_SECRET_ARN": slack_webhook_secret_arn_cfg},
+        variables={
+            "SLACK_WEBHOOK_SECRET_ARN": slack_webhook_secret_arn_cfg,
+            # AWS→GCP federation; values from cost-gate's terraform outputs.
+            # Setting empty defaults would mask a missing-config bug.
+            "GCP_WIF_PROVIDER_RESOURCE_NAME": config.require("gcpWifProviderResourceName"),
+            "GCP_SA_EMAIL": config.require("gcpAwsRecommenderReaderSaEmail"),
+            "GCP_PROJECT_ID": config.require("gcpProjectId"),
+        },
     ),
     tags={"FinOps-Managed": "True", "Environment": "Dev"},
 )

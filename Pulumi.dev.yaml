@@ -3,3 +3,6 @@ config:
   finops-agentic-remediation:slackSecretArn: "arn:aws:secretsmanager:eu-west-2:582600397173:secret:slack/finops/signing-secret-ZmHJzS"
   finops-agentic-remediation:orgId: "single-account"
   finops-agentic-remediation:slackWebhookSecretArn: arn:aws:secretsmanager:eu-west-2:582600397173:secret:slack/finops/webhook-url-vYsv3F
+  finops-agentic-remediation:gcpWifProviderResourceName: projects/388210931048/locations/global/workloadIdentityPools/aws-finops-bridge/providers/aws-account-582600397173
+  finops-agentic-remediation:gcpAwsRecommenderReaderSaEmail: aws-recommender-reader@finops-governance.iam.gserviceaccount.com
+  finops-agentic-remediation:gcpProjectId: finops-governance
