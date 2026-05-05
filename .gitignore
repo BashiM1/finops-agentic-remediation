@@ -28,6 +28,9 @@ Pulumi.*.yaml
 sbom.json
 *.snyk.result
 
+# Local Claude Code workspace file — never committed
+CLAUDE.md
+
 # AWS
 .aws/
 

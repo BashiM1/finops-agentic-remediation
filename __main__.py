@@ -892,6 +892,210 @@ aws.lambda_.Permission(
 )
 
 # ==============================================================================
+# ==============================================================================
+# COST-GATE FOLLOW-UP BRIDGE
+# ==============================================================================
+# When the cost-gate service emits CostGateThresholdExceeded onto
+# finops-hub-bus, this bridge schedules a Slack follow-up notification
+# `review_after_days` from now. Two Lambdas, two roles, one rule.
+#
+#   EB rule  →  followup_scheduler  →  EB Scheduler one-time entry
+#                                         │
+#                                  fires at +N days
+#                                         ▼
+#                                   followup_notifier  →  Slack webhook
+#
+# Approval buttons are intentionally not wired here — that is P2.
+# ==============================================================================
+
+slack_webhook_secret_arn_cfg = config.require("slackWebhookSecretArn")
+
+# ── Notifier Lambda role + function ────────────────────────────────
+followup_notifier_role = aws.iam.Role(
+    "followup-notifier-role",
+    name="finops-followup-notifier-role",
+    assume_role_policy=json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "lambda.amazonaws.com"},
+            "Action": "sts:AssumeRole",
+        }],
+    }),
+    tags={"FinOps-Managed": "True", "Environment": "Dev"},
+)
+
+aws.iam.RolePolicyAttachment(
+    "followup-notifier-basic-exec",
+    role=followup_notifier_role.name,
+    policy_arn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+)
+
+aws.iam.RolePolicy(
+    "followup-notifier-policy",
+    role=followup_notifier_role.id,
+    policy=json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "ReadSlackWebhookSecret",
+            "Effect": "Allow",
+            "Action": "secretsmanager:GetSecretValue",
+            "Resource": slack_webhook_secret_arn_cfg,
+        }],
+    }),
+)
+
+followup_notifier_lambda = aws.lambda_.Function(
+    "followup-notifier-lambda",
+    name="finops-followup-notifier",
+    code=pulumi.FileArchive("./lambdas/followup_notifier"),
+    role=followup_notifier_role.arn,
+    handler="main.lambda_handler",
+    runtime=aws.lambda_.Runtime.PYTHON3D11,
+    timeout=15,
+    memory_size=128,
+    environment=aws.lambda_.FunctionEnvironmentArgs(
+        variables={"SLACK_WEBHOOK_SECRET_ARN": slack_webhook_secret_arn_cfg},
+    ),
+    tags={"FinOps-Managed": "True", "Environment": "Dev"},
+)
+
+# ── EventBridge Scheduler invocation role ──────────────────────────
+# Assumed by scheduler.amazonaws.com when the schedule fires; sole
+# permission is to invoke the notifier Lambda.
+scheduler_invocation_role = aws.iam.Role(
+    "scheduler-invocation-role",
+    name="finops-followup-scheduler-invocation-role",
+    assume_role_policy=json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "scheduler.amazonaws.com"},
+            "Action": "sts:AssumeRole",
+            "Condition": {
+                "StringEquals": {"aws:SourceAccount": account_id},
+            },
+        }],
+    }),
+    tags={"FinOps-Managed": "True", "Environment": "Dev"},
+)
+
+aws.iam.RolePolicy(
+    "scheduler-invocation-policy",
+    role=scheduler_invocation_role.id,
+    policy=followup_notifier_lambda.arn.apply(lambda arn: json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "InvokeFollowupNotifier",
+            "Effect": "Allow",
+            "Action": "lambda:InvokeFunction",
+            "Resource": arn,
+        }],
+    })),
+)
+
+# ── Scheduler Lambda role + function ───────────────────────────────
+followup_scheduler_role = aws.iam.Role(
+    "followup-scheduler-role",
+    name="finops-followup-scheduler-role",
+    assume_role_policy=json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Service": "lambda.amazonaws.com"},
+            "Action": "sts:AssumeRole",
+        }],
+    }),
+    tags={"FinOps-Managed": "True", "Environment": "Dev"},
+)
+
+aws.iam.RolePolicyAttachment(
+    "followup-scheduler-basic-exec",
+    role=followup_scheduler_role.name,
+    policy_arn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+)
+
+aws.iam.RolePolicy(
+    "followup-scheduler-policy",
+    role=followup_scheduler_role.id,
+    policy=pulumi.Output.all(
+        invocation_role_arn=scheduler_invocation_role.arn,
+        account=account_id,
+    ).apply(lambda args: json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "ManageOneTimeSchedules",
+                "Effect": "Allow",
+                "Action": [
+                    "scheduler:CreateSchedule",
+                    "scheduler:GetSchedule",
+                    "scheduler:DeleteSchedule",
+                ],
+                "Resource": f"arn:aws:scheduler:eu-west-2:{args['account']}:schedule/default/*",
+            },
+            {
+                "Sid": "PassInvocationRoleToScheduler",
+                "Effect": "Allow",
+                "Action": "iam:PassRole",
+                "Resource": args["invocation_role_arn"],
+                "Condition": {
+                    "StringEquals": {"iam:PassedToService": "scheduler.amazonaws.com"},
+                },
+            },
+        ],
+    })),
+)
+
+followup_scheduler_lambda = aws.lambda_.Function(
+    "followup-scheduler-lambda",
+    name="finops-followup-scheduler",
+    code=pulumi.FileArchive("./lambdas/followup_scheduler"),
+    role=followup_scheduler_role.arn,
+    handler="main.lambda_handler",
+    runtime=aws.lambda_.Runtime.PYTHON3D11,
+    timeout=15,
+    memory_size=128,
+    environment=aws.lambda_.FunctionEnvironmentArgs(
+        variables={
+            "NOTIFIER_LAMBDA_ARN": followup_notifier_lambda.arn,
+            "SCHEDULER_ROLE_ARN": scheduler_invocation_role.arn,
+            "SCHEDULE_GROUP_NAME": "default",
+        },
+    ),
+    tags={"FinOps-Managed": "True", "Environment": "Dev"},
+)
+
+# ── EventBridge rule + target on the hub bus ───────────────────────
+cost_gate_rule = aws.cloudwatch.EventRule(
+    "cost-gate-threshold-rule",
+    name="cost-gate-threshold-exceeded",
+    event_bus_name=hub_bus.name,
+    description="Route CostGateThresholdExceeded events to the follow-up scheduler.",
+    event_pattern=json.dumps({
+        "source": ["cost-gate"],
+        "detail-type": ["CostGateThresholdExceeded"],
+    }),
+)
+
+aws.cloudwatch.EventTarget(
+    "cost-gate-threshold-target",
+    rule=cost_gate_rule.name,
+    event_bus_name=hub_bus.name,
+    target_id="followup-scheduler",
+    arn=followup_scheduler_lambda.arn,
+)
+
+aws.lambda_.Permission(
+    "followup-scheduler-eb-invoke",
+    statement_id="AllowEventBridgeInvoke",
+    action="lambda:InvokeFunction",
+    function=followup_scheduler_lambda.name,
+    principal="events.amazonaws.com",
+    source_arn=cost_gate_rule.arn,
+)
+
+# ==============================================================================
 # STACK OUTPUTS
 # ==============================================================================
 pulumi.export("account_id", account_id)
@@ -902,3 +1106,6 @@ pulumi.export("approvers_table_name", approvers_table.name)
 pulumi.export("state_cache_table_name", state_cache_table.name)
 pulumi.export("audit_ledger_bucket", finops_audit_ledger.bucket)
 pulumi.export("escalation_topic_arn", escalation_topic.arn)
+pulumi.export("followup_scheduler_lambda_name", followup_scheduler_lambda.name)
+pulumi.export("followup_notifier_lambda_name", followup_notifier_lambda.name)
+pulumi.export("cost_gate_threshold_rule_arn", cost_gate_rule.arn)
