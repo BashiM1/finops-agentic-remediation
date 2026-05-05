@@ -360,6 +360,8 @@ executor_policy = aws.iam.RolePolicy(
                 "Effect": "Allow",
                 "Action": [
                     "ec2:StopInstances",
+                    "ec2:StartInstances",
+                    "ec2:ModifyInstanceAttribute",
                     "ec2:CreateSnapshot",
                     "ec2:DescribeInstances",
                     "ec2:DescribeTags"
@@ -516,6 +518,12 @@ slack_gateway_lambda = aws.lambda_.Function(
     tags={"FinOps-Managed": "True", "Environment": "Dev"}
 )
 
+escalation_topic = aws.sns.Topic(
+    "finops-escalation",
+    name="finops-escalation-topic",
+    tags={"FinOps-Managed": "True", "Environment": "Dev"}
+)
+
 execution_lambda = aws.lambda_.Function(
     "execution-lambda",
     name="finops-executor",
@@ -523,12 +531,40 @@ execution_lambda = aws.lambda_.Function(
     role=executor_role.arn,
     handler="main.lambda_handler",
     runtime=aws.lambda_.Runtime.PYTHON3D11,
-    timeout=60,
+    # Bumped 60→300 so a stop/modify/start sequence with EC2 waiters
+    # (typically 60–120s end-to-end) fits without timeout pressure.
+    timeout=300,
     memory_size=256,
+    environment=aws.lambda_.FunctionEnvironmentArgs(
+        variables={
+            # Default true in dev; flipped to "false" only on demo day
+            # via Pulumi config override. Gates the actual EC2 mutation
+            # calls inside the rightsize action.
+            "DRY_RUN": config.get("executorDryRun") or "true",
+            "ESCALATION_TOPIC_ARN": escalation_topic.arn,
+        },
+    ),
     tracing_config=aws.lambda_.FunctionTracingConfigArgs(
         mode="Active"
     ),
     tags={"FinOps-Managed": "True", "Environment": "Dev"}
+)
+
+# Inline policy added separately (escalation_topic is declared later in
+# the file than executor_role). Grants only sns:Publish on the existing
+# escalation topic — the executor never creates new topics.
+aws.iam.RolePolicy(
+    "executor-escalation-policy",
+    role=executor_role.id,
+    policy=escalation_topic.arn.apply(lambda arn: json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "PublishExecutorEscalations",
+            "Effect": "Allow",
+            "Action": "sns:Publish",
+            "Resource": arn,
+        }],
+    })),
 )
 # ─────────────────────────────────────────────────────────────────
 # Callback Processor Lambda
@@ -631,11 +667,9 @@ callback_processor_event_source = aws.lambda_.EventSourceMapping(
     batch_size=1,
     enabled=True,
 )
-escalation_topic = aws.sns.Topic(
-    "finops-escalation",
-    name="finops-escalation-topic",
-    tags={"FinOps-Managed": "True", "Environment": "Dev"}
-)
+# escalation_topic moved earlier in this file so the executor Lambda
+# (declared above) can reference it for the rightsize-failure escalation
+# path. Functionally unchanged.
 
 # ==============================================================================
 # 8. STEP FUNCTIONS ORCHESTRATION
