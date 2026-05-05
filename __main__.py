@@ -936,12 +936,31 @@ aws.iam.RolePolicy(
     role=followup_notifier_role.id,
     policy=json.dumps({
         "Version": "2012-10-17",
-        "Statement": [{
-            "Sid": "ReadSlackWebhookSecret",
-            "Effect": "Allow",
-            "Action": "secretsmanager:GetSecretValue",
-            "Resource": slack_webhook_secret_arn_cfg,
-        }],
+        "Statement": [
+            {
+                "Sid": "ReadSlackWebhookSecret",
+                "Effect": "Allow",
+                "Action": "secretsmanager:GetSecretValue",
+                "Resource": slack_webhook_secret_arn_cfg,
+            },
+            {
+                "Sid": "ReadComputeOptimizerEC2Recommendations",
+                "Effect": "Allow",
+                "Action": "compute-optimizer:GetEC2InstanceRecommendations",
+                "Resource": "*",
+            },
+            {
+                # GetEC2InstanceRecommendations internally calls
+                # ec2:DescribeInstances against the caller's identity
+                # to resolve instance metadata; the call returns
+                # AccessDenied on EC2:DescribeInstances if missing.
+                # Confirmed via CloudTrail trace 2026-05-05T00:49:20Z.
+                "Sid": "ReadEC2DescribeForComputeOptimizer",
+                "Effect": "Allow",
+                "Action": "ec2:DescribeInstances",
+                "Resource": "*",
+            },
+        ],
     }),
 )
 

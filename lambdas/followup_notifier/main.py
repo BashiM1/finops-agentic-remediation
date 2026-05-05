@@ -29,6 +29,8 @@ from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.auth.transport.requests import AuthorizedSession, Request
 
 secretsmanager = boto3.client("secretsmanager", region_name="eu-west-2")
+compute_optimizer = boto3.client("compute-optimizer", region_name="eu-west-2")
+_AWS_ACCOUNT_ID = "582600397173"
 
 SLACK_WEBHOOK_SECRET_ARN = os.environ["SLACK_WEBHOOK_SECRET_ARN"]
 GCP_WIF_PROVIDER_RESOURCE_NAME = os.environ.get("GCP_WIF_PROVIDER_RESOURCE_NAME", "")
@@ -41,6 +43,99 @@ _GCE_RECOMMENDER_ID = "google.compute.instance.MachineTypeRecommender"
 _webhook_cache: str | None = None
 _gcp_credentials = None
 _gcp_session: AuthorizedSession | None = None
+
+
+def _ec2_arn(instance_id: str, region: str) -> str:
+    return f"arn:aws:ec2:{region}:{_AWS_ACCOUNT_ID}:instance/{instance_id}"
+
+
+def _enrich_aws_instance(instance_id: str, region: str) -> dict:
+    """Pull a Compute Optimizer recommendation for one EC2 instance.
+
+    Returns an enrichment dict whose `status` is one of:
+      - `ok`           : finding present (may be OPTIMIZED or OVER/UNDER_PROVISIONED)
+      - `no_data`      : Compute Optimizer has no findings yet (needs ~30h of metrics)
+      - `not_opted_in` : the account hasn't enrolled in Compute Optimizer
+      - `error`        : transient/unexpected failure
+    Never raises.
+    """
+    arn = _ec2_arn(instance_id, region)
+    try:
+        resp = compute_optimizer.get_ec2_instance_recommendations(instanceArns=[arn])
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("OptInRequiredException", "AccessDeniedException"):
+            print(f"COMPUTE_OPTIMIZER_NOT_OPTED_IN: instance={instance_id} code={code}")
+            return {"status": "not_opted_in", "instance_id": instance_id}
+        print(f"COMPUTE_OPTIMIZER_ERROR: instance={instance_id} code={code}")
+        return {"status": "error", "instance_id": instance_id, "code": code}
+
+    errors = resp.get("errors") or []
+    recs = resp.get("instanceRecommendations") or []
+    if not recs:
+        # An entry in `errors` here typically means the instance is not yet
+        # known to Compute Optimizer (insufficient metric history). Empty
+        # both lists = enrolled but haven't seen this instance yet.
+        err_code = errors[0].get("code", "no_recommendation") if errors else "no_recommendation"
+        print(f"COMPUTE_OPTIMIZER_NO_DATA: instance={instance_id} code={err_code}")
+        return {"status": "no_data", "instance_id": instance_id, "code": err_code}
+
+    rec = recs[0]
+    finding = rec.get("finding", "UNKNOWN")
+    current_type = rec.get("currentInstanceType", "")
+    options = rec.get("recommendationOptions") or []
+    top = options[0] if options else {}
+    recommended_type = top.get("instanceType", "")
+    savings = (top.get("estimatedMonthlySavings") or {}).get("value", 0.0)
+    util = {
+        m.get("name", "").upper(): m.get("value")
+        for m in (rec.get("utilizationMetrics") or [])
+        if m.get("statistic") == "MAXIMUM"
+    }
+
+    print(
+        f"COMPUTE_OPTIMIZER_OK: instance={instance_id} finding={finding} "
+        f"current={current_type} recommend={recommended_type} savings_usd={savings}"
+    )
+    return {
+        "status": "ok",
+        "instance_id": instance_id,
+        "current_type": current_type,
+        "recommended_type": recommended_type,
+        "finding": finding,
+        "estimated_monthly_savings_usd": savings,
+        "utilisation": {  # only MAX statistic, the most actionable for right-sizing
+            "cpu_pct": util.get("CPU"),
+            "memory_pct": util.get("MEMORY"),
+        },
+    }
+
+
+_GCP_PENDING_NOTE = "GCP Recommender enrichment pending — ships with GCP remediation engine"
+
+
+def _build_enriched_resources(detail: dict) -> list[dict]:
+    """Per-resource enrichment loop. Each entry = original resource + `enrichment`."""
+    enriched: list[dict] = []
+    for r in detail.get("resources") or []:
+        out = dict(r)
+        cloud = r.get("cloud")
+        rtype = r.get("resource_type", "")
+        if cloud == "aws" and rtype == "aws_instance":
+            instance_id = r.get("instance_id")
+            if not instance_id:
+                out["enrichment"] = {
+                    "status": "skipped",
+                    "reason": "no instance_id in event detail",
+                }
+            else:
+                out["enrichment"] = _enrich_aws_instance(instance_id, r.get("region", "eu-west-2"))
+        elif cloud == "gcp":
+            out["enrichment"] = {"status": "pending", "reason": _GCP_PENDING_NOTE}
+        else:
+            out["enrichment"] = {"status": "skipped", "reason": f"no enricher for {cloud}/{rtype}"}
+        enriched.append(out)
+    return enriched
 
 
 def _get_webhook_url() -> str:
@@ -245,6 +340,51 @@ def _query_recommender(detail: dict) -> dict:
     return {"status": "ok", "zones": sorted(zones), "recommendations": all_recs}
 
 
+def _format_finding_line(r: dict) -> str:
+    e = r.get("enrichment") or {}
+    addr = r.get("address", "?")
+    status = e.get("status")
+    if status == "ok":
+        finding = e.get("finding", "UNKNOWN")
+        cur = e.get("current_type", "?")
+        rec = e.get("recommended_type", "")
+        savings = e.get("estimated_monthly_savings_usd", 0.0) or 0.0
+        util = e.get("utilisation") or {}
+        cpu = util.get("cpu_pct")
+        mem = util.get("memory_pct")
+        util_bits = []
+        if cpu is not None:
+            util_bits.append(f"CPU {cpu:.1f}% max")
+        if mem is not None:
+            util_bits.append(f"Mem {mem:.1f}% max")
+        util_str = f" — {', '.join(util_bits)}" if util_bits else ""
+        if finding == "OPTIMIZED" or not rec:
+            return f"• `{addr}` ({cur}) — Compute Optimizer: OPTIMIZED, no change recommended{util_str}"
+        return (
+            f"• `{addr}` ({cur}) — Compute Optimizer: {finding} → "
+            f"{rec}, save ${savings:,.2f}/mo{util_str}"
+        )
+    if status == "no_data":
+        return f"• `{addr}` — Compute Optimizer: no data yet (needs ~30h of metrics)"
+    if status == "not_opted_in":
+        return f"• `{addr}` — Compute Optimizer: account not opted in"
+    if status == "pending":
+        return f"• `{addr}` — {e.get('reason', '')}"
+    if status == "skipped":
+        return f"• `{addr}` — enrichment skipped: {e.get('reason', '')}"
+    return f"• `{addr}` — enrichment unavailable"
+
+
+def _build_findings_section(enriched: list[dict]) -> dict | None:
+    if not enriched:
+        return None
+    lines = [_format_finding_line(r) for r in enriched]
+    text = "*Optimisation findings*\n" + "\n".join(lines)
+    if len(text) > 2900:
+        text = text[:2896] + "\n…"
+    return {"type": "section", "text": {"type": "mrkdwn", "text": text}}
+
+
 def _post(webhook_url: str, blocks: list[dict], fallback_text: str) -> bool:
     payload = json.dumps({"text": fallback_text, "blocks": blocks}).encode("utf-8")
     req = urllib.request.Request(
@@ -279,26 +419,20 @@ def lambda_handler(event, _context):
         print(f"SECRET_FETCH_ERROR: {type(exc).__name__}")
         raise
 
-    # Best-effort GCP enrichment — never blocks the Slack post.
-    rec_result = _query_recommender(detail)
+    # Per-resource enrichment. Compute Optimizer for AWS EC2; "pending"
+    # placeholder for GCP. Never raises; never blocks the Slack post.
+    enriched = _build_enriched_resources(detail)
+
+    # Keep the GCP federation call exercised so the bridge stays warm
+    # and we'd notice if it broke; the result no longer drives Slack
+    # rendering — per-resource view replaces it.
+    _query_recommender(detail)
 
     fallback = f"Cost Gate follow-up for {repository} PR#{pr_number}"
     blocks = _build_blocks(detail)
-    if rec_result.get("status") == "ok" and rec_result.get("recommendations"):
-        rec_lines = [
-            f"• `{r['zone']}` — {r['description'][:140]}"
-            for r in rec_result["recommendations"][:5]
-        ]
-        blocks.insert(
-            -1,
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": "*GCP Recommender right-sizing hints:*\n" + "\n".join(rec_lines),
-                },
-            },
-        )
+    findings_section = _build_findings_section(enriched)
+    if findings_section is not None:
+        blocks.insert(-1, findings_section)
     if not _post(webhook, blocks, fallback):
         # Raise so Scheduler records this as a failed invocation. The
         # schedule deletes itself afterwards either way (one-time +
